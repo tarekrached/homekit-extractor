@@ -528,7 +528,8 @@ def _dump_inventory(cur: sqlite3.Cursor, rooms: dict[int, str]) -> list[dict]:
     cur.execute('PRAGMA table_info("ZMKFACCESSORY")')
     cols = {row[1] for row in cur.fetchall()}
     extra = [c for c in ("ZSERIALNUMBER", "ZBRIDGE", "ZFIRMWAREVERSION") if c in cols]
-    sel = "Z_PK, ZCONFIGUREDNAME, ZMANUFACTURER, ZMODEL, ZUNIQUEIDENTIFIER, ZROOM"
+    sel = ("Z_PK, COALESCE(NULLIF(ZCONFIGUREDNAME, ''), ZPROVIDEDNAME), "
+           "ZMANUFACTURER, ZMODEL, ZUNIQUEIDENTIFIER, ZROOM")
     if extra:
         sel += ", " + ", ".join(extra)
     cur.execute(f"SELECT {sel} FROM ZMKFACCESSORY")
