@@ -50,6 +50,7 @@ import json
 import os
 import plistlib
 import sqlite3
+import struct
 import sys
 import uuid as uuid_mod
 
@@ -295,6 +296,36 @@ def parse_protobuf(data: bytes, depth: int = 0) -> dict[int, list[tuple[str, obj
         else:
             break
     return fields
+
+
+# ---------------------------------------------------------------------------
+# OPACK scalar decoder
+# ---------------------------------------------------------------------------
+
+def decode_opack_scalar(data: bytes):
+    """Decode a scalar in Apple's OPACK encoding, or return None.
+
+    Newer homed writes many ZTARGETVALUEs this way instead of as a bplist:
+    0x01 true, 0x02 false, 0x08-0x2F the integers 0-39, 0x30-0x33 little-endian
+    int8/16/32/64, 0x35/0x36 float32/float64. Verified 2026-10-09 against
+    values read in the Home app (0x09 = on, 0x303f = 63%).
+    """
+    if not data:
+        return None
+    t, rest = data[0], data[1:]
+    if t == 0x01:
+        return True
+    if t == 0x02:
+        return False
+    if 0x08 <= t <= 0x2F:
+        return t - 0x08
+    ints = {0x30: "<b", 0x31: "<h", 0x32: "<i", 0x33: "<q"}
+    floats = {0x35: "<f", 0x36: "<d"}
+    fmt = ints.get(t) or floats.get(t)
+    if fmt is None or len(rest) < struct.calcsize(fmt):
+        return None
+    val = struct.unpack(fmt, rest[: struct.calcsize(fmt)])[0]
+    return round(val, 6) if t in floats else val
 
 
 # ---------------------------------------------------------------------------
@@ -719,7 +750,17 @@ def _extract_actions(
                 try:
                     ad["targetValue"] = make_serializable(plistlib.loads(act_target))
                 except Exception:
-                    pass
+                    tv = extract_target_value_from_nsarchiver(bytes(act_target))
+                    if tv is None:
+                        tv = decode_opack_scalar(bytes(act_target))
+                    if tv is not None:
+                        ad["targetValue"] = tv
+            if "targetValue" not in ad:
+                # Undecoded: keep the raw bytes so the value is recoverable offline.
+                if act_target:
+                    ad["targetValueRaw"] = bytes(act_target).hex()
+                if act_data:
+                    ad["dataRaw"] = bytes(act_data).hex()
             if act_char:
                 # Instance id scoped to act_svc, not a Z_PK.
                 ci = chars_by_instance.get((act_svc, act_char)) or {}
@@ -911,6 +952,20 @@ def extract(db_path: str, verbose: bool = False) -> dict:
 
         all_automations.append(auto)
 
+    # Scenes: every action set, not only the ones a trigger points at. User
+    # scenes (HMActionSetTypeUserDefined) are reachable from nothing else.
+    cur.execute("SELECT Z_PK, ZNAME, ZTYPE FROM ZMKFACTIONSET")
+    all_scenes = [
+        {
+            "name": aset_name or "",
+            "type": aset_type or "",
+            "actions": _extract_actions(
+                cur, aset_pk, chars_by_instance, acc_names, svc_names, verbose
+            ),
+        }
+        for aset_pk, aset_name, aset_type in cur.fetchall()
+    ]
+
     inventory = _dump_inventory(cur, rooms)
     conn.close()
 
@@ -958,6 +1013,7 @@ def extract(db_path: str, verbose: bool = False) -> dict:
         "rooms": sorted(r for r in rooms.values() if r),
         "accessories": inventory,
         "automations": all_automations,
+        "scenes": all_scenes,
     }
     return output
 
